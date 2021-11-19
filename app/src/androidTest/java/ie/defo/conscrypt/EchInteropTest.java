@@ -17,10 +17,14 @@
 package ie.defo.conscrypt;
 
 import android.content.Context;
-import android.net.DnsResolver;
+import android.os.Build;
+import android.os.CancellationSignal;
+import android.os.Handler;
+import android.os.Looper;
 
 import org.apache.commons.io.IOUtils;
 import org.conscrypt.Conscrypt;
+import org.conscrypt.EchDnsPacket;
 import org.conscrypt.com.android.net.module.util.DnsPacket;
 import org.junit.After;
 import org.junit.Before;
@@ -29,13 +33,19 @@ import org.junit.runner.RunWith;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.net.UnknownHostException;
 import java.security.NoSuchAlgorithmException;
 import java.security.Security;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
@@ -51,9 +61,6 @@ import static org.junit.Assert.assertTrue;
 
 @RunWith(AndroidJUnit4.class)
 public class EchInteropTest {
-
-    public static final int TYPE_SVCB = 64; // [draft-ietf-dnsop-svcb-https-00]
-    public static final int TYPE_HTTPS = 65; // [draft-ietf-dnsop-svcb-https-00]
 
     String[] hosts = {
             "www.yandex.ru",
@@ -86,7 +93,6 @@ public class EchInteropTest {
         Security.insertProviderAt(Conscrypt.newProvider(), 1);
         assertTrue(Conscrypt.isAvailable());
         assertTrue(Conscrypt.isConscrypt(SSLContext.getInstance("TLSv1.3")));
-        prefetchDns(hosts);
     }
 
     @After
@@ -135,77 +141,118 @@ public class EchInteropTest {
         }
     */
 
-    void echPbuf(String msg, byte[] buf) {
-        int blen = buf.length;
-        System.out.print(msg + " (" + blen + "):\n    ");
-        for (int i = 0; i < blen; i++) {
-            if ((i != 0) && (i % 16 == 0))
-                System.out.print("\n    ");
-            System.out.print(String.format("%02x:", Byte.toUnsignedInt(buf[i])));
+    /**
+     * This is a hack to make a blocking method because the underlying blocking
+     * methods that actually do the query are {@code @hide} on Android and on
+     * Android's reflection blacklist:
+     * <p>
+     * {@code Accessing hidden method Landroid/net/NetworkUtils;->resNetworkQuery(ILjava/lang/String;III)Ljava/io/FileDescriptor; (blacklist, reflection, denied)}
+     *
+     * @see android.net.NetworkUtils#resNetworkQuery(int, String, int, int, int)
+     */
+    public static byte[] getEchConfigListFromDns(String dnshost) {
+        if (Build.VERSION.SDK_INT < 29) {
+            return null;
         }
-        System.out.print("\n");
-    }
-
-    @Test
-    public void testConnectHttpsURLConnection() throws IOException {
-        Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        assertEquals("ie.defo.conscrypt", appContext.getPackageName());
-        DnsResolver dnsResolver = DnsResolver.getInstance();
-
-        dnsResolver.rawQuery(null, "deb.debian.org", DnsResolver.CLASS_IN, DnsResolver.TYPE_A, DnsResolver.FLAG_EMPTY,
-                appContext.getMainExecutor(), null,
-                new DnsResolver.Callback<byte[]>() {
-                    final String host = "deb.debian.org";
-
-                    @Override
-                    public void onAnswer(@NonNull byte[] answer, int rcode) {
-                        System.out.println("onAnswer " + host + " " + rcode + ": " + new String(answer));
-                        echPbuf("onAnswer " + host, answer);
-                        System.out.println("------------------------------------------------------------");
+        final byte[][] echConfigListReturn = {null};
+        try {
+            Executor executor = new Executor() {
+                @Override
+                public void execute(Runnable command) {
+                    final Handler handler = new Handler(Looper.getMainLooper());
+                    if (handler == null) {
+                        throw new NullPointerException();
                     }
-
-                    @Override
-                    public void onError(@NonNull DnsResolver.DnsException error) {
-                        System.out.println("onError " + error);
+                    if (!handler.post(command)) {
+                        throw new RejectedExecutionException(handler + " is shutting down");
                     }
-                });
-
-
-        for (String hostString : hosts) {
-            System.out.println("EchInteroptTest " + hostString + " =================================");
-            String[] h = hostString.split(":");
-            String tmp = h[0];
-            if (h.length > 1) {
-                if (!"443".equals(h[1])) {
-                    tmp = "_" + h[1] + "._https." + h[0]; // query for non-standard port
                 }
-            }
-            final String host = tmp;
+            };
+            final CountDownLatch latch = new CountDownLatch(1);
 
-            dnsResolver.rawQuery(null, host, DnsResolver.CLASS_IN, TYPE_HTTPS, DnsResolver.FLAG_EMPTY, appContext.getMainExecutor(), null,
-                    new DnsResolver.Callback<byte[]>() {
+            Class dnsResolverClass = Class.forName("android.net.DnsResolver");
+            Field classInField = dnsResolverClass.getField("CLASS_IN");
+            final int CLASS_IN = classInField.getInt(null);
+            Field flagEmptyField = dnsResolverClass.getField("FLAG_EMPTY");
+            final int FLAG_EMPTY = flagEmptyField.getInt(null);
+            System.out.println("CLASS_IN " + CLASS_IN + "  FLAG_EMPTY " + FLAG_EMPTY);
+
+            Method getInstance = dnsResolverClass.getMethod("getInstance", (Class[]) null);
+            Object dnsResolverInstance = getInstance.invoke(dnsResolverClass);
+            System.out.println("dnsResolverInstance " + dnsResolverInstance);
+
+            android.net.DnsResolver dnsResolver = android.net.DnsResolver.getInstance();
+            dnsResolver.rawQuery(null, dnshost,
+                    CLASS_IN, EchDnsPacket.TYPE_HTTPS, FLAG_EMPTY,
+                    executor, null,
+                    new android.net.DnsResolver.Callback<byte[]>() {
+                        final String host = "deb.debian.org";
 
                         @Override
                         public void onAnswer(@NonNull byte[] answer, int rcode) {
-                            System.out.println("onAnswer " + host + " " + rcode + ": ");
-                            //System.out.println("onAnswer " + host + " " + rcode + ": " + new String(answer));
-                            DnsEchAnswer dnsEchAnswer = new DnsEchAnswer(answer);
-                            dnsEchAnswer.getEchConfigList();
-                            //echPbuf("onAnswer " + host, answer);
-                            try {
-                                IOUtils.writeChunked(answer,
-                                        new FileOutputStream(new File(appContext.getFilesDir(), host + ".bin")));
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                            System.out.println("----------------------------------------------------------");
+                            Conscrypt.echPbuf(dnshost + " answer", answer);
+                            EchDnsPacket echDnsPacket = new EchDnsPacket(answer);
+                            echConfigListReturn[0] = echDnsPacket.getEchConfigList();
+                            Conscrypt.echPbuf(dnshost + "echConfigListReturn[0]", echConfigListReturn[0]);
+                            latch.countDown();
                         }
 
                         @Override
-                        public void onError(@NonNull DnsResolver.DnsException error) {
-                            System.out.println("onError " + error);
+                        public void onError(@NonNull android.net.DnsResolver.DnsException error) {
+                            System.out.println("onError  " + error);
+                            latch.countDown();
                         }
                     });
+            latch.await(10, TimeUnit.MINUTES);
+        } catch (InterruptedException | ClassNotFoundException | NoSuchFieldException | IllegalAccessException
+                | NoSuchMethodException | InvocationTargetException e) {
+            // ignored
+        }
+        return echConfigListReturn[0];
+    }
+
+    private class AndroidNetDnsResolverCallback {
+
+        private final CountDownLatch latch = new CountDownLatch(1);
+        private byte[] echConfigList = null;
+
+        public byte[] getEchConfigList() {
+            return echConfigList;
+        }
+
+        public void onAnswer(@NonNull byte[] answer, int rcode) {
+            Conscrypt.echPbuf(" answer", answer);
+            EchDnsPacket echDnsPacket = new EchDnsPacket(answer);
+            echConfigList = echDnsPacket.getEchConfigList();
+            Conscrypt.echPbuf("echConfigList", echConfigList);
+            latch.countDown();
+        }
+
+        public void onError(@NonNull android.net.DnsResolver.DnsException error) {
+            System.out.println("onError  " + error);
+            latch.countDown();
+        }
+    }
+
+    //private DnsResolver.DnsResponse
+
+    @Test
+    public void testConnectHttpsURLConnection() throws IOException, InterruptedException {
+        Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        assertEquals("ie.defo.conscrypt", appContext.getPackageName());
+
+        for (String hostString : hosts) {
+            System.out.println("EchInteroptTest.testConnectHttpsURLConnection " + hostString + " ==================");
+            String[] h = hostString.split(":");
+            String dnshost = h[0];
+            if (h.length > 1) {
+                if (!"443".equals(h[1])) {
+                    dnshost = "_" + h[1] + "._https." + h[0]; // query for non-standard port
+                }
+            }
+            byte[] echConfigList = getEchConfigListFromDns(dnshost);
+            Conscrypt.echPbuf(hostString, echConfigList);
+            return;
 
             /*
             URL url = new URL("https://" + hostString);
@@ -237,7 +284,54 @@ public class EchInteropTest {
         }
     }
 
-    class DnsEchAnswer extends DnsPacket {
+    //@Test
+    public void testWriteOutDnsAnswerBytes() {
+        Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        assertEquals("ie.defo.conscrypt", appContext.getPackageName());
+
+        for (String hostString : hosts) {
+            System.out.println("EchInteroptTest.testWriteOutDnsAnswerBytes " + hostString + " =====================");
+            String[] h = hostString.split(":");
+            String tmp = h[0];
+            if (h.length > 1) {
+                if (!"443".equals(h[1])) {
+                    tmp = "_" + h[1] + "._https." + h[0]; // query for non-standard port
+                }
+            }
+            final String host = tmp;
+
+            android.net.DnsResolver dnsResolver = android.net.DnsResolver.getInstance();
+            dnsResolver.rawQuery(null, host,
+                    android.net.DnsResolver.CLASS_IN, EchDnsPacket.TYPE_HTTPS, android.net.DnsResolver.FLAG_EMPTY,
+                    appContext.getMainExecutor(), null,
+                    new android.net.DnsResolver.Callback<byte[]>() {
+
+                        @Override
+                        public void onAnswer(@NonNull byte[] answer, int rcode) {
+                            System.out.println("onAnswer " + host + " " + rcode + ": ");
+                            //System.out.println("onAnswer " + host + " " + rcode + ": " + new String(answer));
+                            Conscrypt.echPbuf("onAnswer " + host + " answer", answer);
+                            DnsEchAnswer dnsEchAnswer = new DnsEchAnswer(answer);
+                            byte[] echConfigList = dnsEchAnswer.getEchConfigList();
+                            Conscrypt.echPbuf("onAnswer " + host + " echConfigList", echConfigList);
+                            try {
+                                IOUtils.writeChunked(answer,
+                                        new FileOutputStream(new File(appContext.getFilesDir(), host + ".bin")));
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                            System.out.println("---------------------------------------------------------");
+                        }
+
+                        @Override
+                        public void onError(@NonNull android.net.DnsResolver.DnsException error) {
+                            System.out.println("onError " + error);
+                        }
+                    });
+        }
+    }
+
+    static class DnsEchAnswer extends DnsPacket {
         private static final String TAG = "DnsResolver.DnsAddressAnswer";
         private static final boolean DBG = true;
 
@@ -276,7 +370,7 @@ public class EchInteropTest {
                 if (nsType != mQueryType || (nsType != TYPE_SVCB && nsType != TYPE_HTTPS)) {
                     continue;
                 }
-                echPbuf("RR", ansSec.getRR());
+                Conscrypt.echPbuf("RR", ansSec.getRR());
                 // TODO port local_ech_add
                 // TODO results.add(InetAddress.getByAddress(ansSec.getRR()));
             }
@@ -347,191 +441,5 @@ public class EchInteropTest {
             Conscrypt.setEchConfigList(sslSocket, echConfigList);
             return sslSocket;
         }
-    }
-
-    /**
-     * Prime the DNS cache with the hosts that are used in these tests.
-     */
-    private void prefetchDns(String[] hosts) {
-        for (final String host : hosts) {
-            new Thread() {
-                @Override
-                public void run() {
-                    try {
-                        InetAddress.getByName(host);
-                    } catch (UnknownHostException e) {
-                        // ignored
-                    }
-                }
-            }.start();
-        }
-    }
-
-    /**
-     * < Max RR value size, as given to API
-     */
-    private static int ECH_MAX_RRVALUE_LEN = 2000;
-    /**
-     * < Max for an ECHConfig extension
-     */
-    private static int ECH_MAX_ECHCONFIGEXT_LEN = 100;
-    /**
-     * < just for a sanity check
-     */
-    private static int ECH_MIN_ECHCONFIG_LEN = 32;
-    /**
-     * < for a sanity check
-     */
-    private static int ECH_MAX_ECHCONFIG_LEN = ECH_MAX_RRVALUE_LEN;
-
-    /**
-     * < implementation will try guess type
-     */
-    private static int ECH_FMT_GUESS = 0;
-    /**
-     * < one or more catenated binary ECHConfigs
-     */
-    private static int ECH_FMT_BIN = 1;
-    /**
-     * < base64 ECHConfigs (';' separated if >1)
-     */
-    private static int ECH_FMT_B64TXT = 2;
-    /**
-     * < ascii-hex ECHConfigs (';' separated if >1)
-     */
-    private static int ECH_FMT_ASCIIHEX = 3;
-    /**
-     * < presentation form of HTTPSSVC
-     */
-    private static int ECH_FMT_HTTPSSVC = 4;
-    /**
-     * the wire-format code for ECH within an SVCB or HTTPS RData
-     */
-    private static int ECH_PCODE_ECH = 0x0005;
-
-
-    /**
-     * @param rrlen    is the length of the rrval
-     * @param rrval    is the binary, base64 or ascii-hex encoded RData
-     * @param num_echs says how many SSL_ECH structures are in the returned array
-     * @param echs     is the returned array of SSL_ECH
-     * @return is 1 for success, error otherwise
-     * @brief Decode SVCB/HTTPS RR value provided as binary or ascii-hex
-     * <p>
-     * The rrval may be the catenation of multiple encoded ECHConfigs.
-     * We internally try decode and handle those and (later)
-     * use whichever is relevant/best. The fmt parameter can be e.g.
-     * ECH_FMT_ASCII_HEX.
-     * <p>
-     * Note that we "succeed" even if there is no ECHConfigs in the input - some
-     * callers might download the RR from DNS and pass it here without looking
-     * inside, and there are valid uses of such RRs. The caller can check though
-     * using the num_echs output.
-     */
-    public static byte[] local_svcb_add(int rrfmt, byte[] rrval) {
-        byte[] echs;
-        int detfmt = ECH_FMT_GUESS;
-        int rv = 0;
-        int binlen = 0; /* the RData */
-        byte[] binbuf = null;
-        //int eklen = 0; /* the ECHConfigs, within the above */
-        //byte[] ekval = null;
-        int cp = 0;
-        int remaining = 0;
-        String dnsname = null;
-        int pcode = 0;
-        int plen = 0;
-        boolean done = false;
-
-        if (rrfmt == ECH_FMT_ASCIIHEX) {
-            detfmt = rrfmt;
-        } else if (rrfmt == ECH_FMT_BIN) {
-            detfmt = rrfmt;
-        } else {
-            /* TODO
-            rv = ech_guess_fmt(rrlen, (unsigned char*)rrval,&detfmt);
-            if (rv == 0) {
-                return (rv);
-            }
-             */
-        }
-        if (detfmt == ECH_FMT_ASCIIHEX) {
-            /* TODO
-            rv = hpke_ah_decode(rrlen, rrval, & binlen,&binbuf);
-            if (rv == 0) {
-                return (rv);
-            }
-             */
-        } else if (detfmt == ECH_FMT_B64TXT) {
-            /* TODO
-            int ebd_rv = ech_base64_decode(rrval, & binbuf);
-            if (ebd_rv <= 0) {
-                return (0);
-            }
-            binlen = (size_t) ebd_rv;
-             */
-        } else if (detfmt == ECH_FMT_BIN) {
-            binlen = rrval.length;
-        }
-
-        /*
-         * Now we have a binary encoded RData so we'll skip the
-         * name, and then walk through the SvcParamKey binary
-         * codes 'till we find what we want
-         */
-        remaining = binlen;
-
-        /*
-         * skip 2 octet priority and TargetName as those are the
-         * application's responsibility, not the library's
-         */
-        if (remaining <= 2) return null;
-        cp += 2;
-        remaining -= 2;
-        cp++;
-        int clen = rrval[cp];
-        while (clen != 0) {
-            if (clen <= remaining) {
-                cp += clen;
-                remaining -= clen + 1;
-                clen = rrval[cp];
-            }
-        }
-        //rv = local_decode_rdata_name( & cp,&remaining,&dnsname);
-        if (rv != 1) {
-            return null;
-        }
-        //OPENSSL_free(dnsname);
-        dnsname = null;
-
-        while (!done && remaining >= 4) {
-            pcode = (rrval[cp] << 8) + rrval[cp + 1];
-            cp += 2;
-            plen = (rrval[cp] << 8) + rrval[cp + 1];
-            cp += 2;
-            remaining -= 4;
-            if (pcode == ECH_PCODE_ECH) {
-                //eklen = (size_t) plen;
-                //ekval = cp;
-                done = true;
-            }
-            if (plen != 0 && plen <= remaining) {
-                cp += plen;
-                remaining -= plen;
-            }
-        }
-        if (!done) {
-            return null;
-        }
-        int retlength = rrval.length - cp;
-        byte[] ret = new byte[retlength];
-        for (int i = 0; i < retlength; i++) {
-            ret[i] = rrval[i + cp];
-        }
-        return ret;
-        /*
-         * Parse & load any ECHConfigs that we found
-         */
-        //rv = local_ech_add(ECH_FMT_BIN, eklen, ekval, num_echs, echs);
     }
 }
