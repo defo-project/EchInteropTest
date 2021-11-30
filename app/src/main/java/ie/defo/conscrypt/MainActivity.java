@@ -27,6 +27,7 @@ import org.conscrypt.Conscrypt;
 
 import java.security.Provider;
 import java.security.Security;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
     public static final String TAG = "MainActivity";
@@ -42,6 +43,7 @@ public class MainActivity extends Activity {
         for (Provider provider : Security.getProviders()) {
             Log.i(TAG, "TLS Provider: " + provider);
         }
+        Conscrypt.checkAvailability();
 
         GenericWebViewClient webViewClient = new GenericWebViewClient(this);
 
@@ -50,7 +52,9 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(webViewClient);
         webView.loadUrl("https://cloudflare.f-droid.org/cdn-cgi/trace");
 
+        Conscrypt.Version version = Conscrypt.version();
         TextView status = findViewById(R.id.status);
-        status.setText("TLS Provider: " + Security.getProviders()[0]);
+        status.setText("TLS Provider: " + Security.getProviders()[0]
+                + String.format(Locale.ENGLISH, " (%d.%d.%s)", version.major(), version.minor(), version.patch()));
     }
 }
