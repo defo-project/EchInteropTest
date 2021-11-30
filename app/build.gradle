@@ -36,8 +36,9 @@ android {
 }
 
 dependencies {
-    implementation fileTree(dir: '/home/hans/code/google/conscrypt/android/build/outputs/aar',
-            include: 'conscrypt-android-debug.aar')
+    //implementation fileTree(dir: '/home/hans/code/google/conscrypt/android/build/outputs/aar',
+    //        include: 'conscrypt-android-debug.aar')
+    implementation 'info.guardianproject.conscrypt:conscrypt-android:2.6.alpha1638179154.job1828169525'
 
     implementation 'commons-io:commons-io:2.6'
     implementation 'commons-net:commons-net:3.6'

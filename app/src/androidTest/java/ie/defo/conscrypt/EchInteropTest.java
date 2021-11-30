@@ -69,7 +69,6 @@ public class EchInteropTest {
             "deb.debian.org", // TLS 1.3 Fastly
             "enabled.tls13.com", // TLS 1.3 enabled by Cloudflare
             "cloudflare.f-droid.org",
-
             "tls13.1d.pw", // TLS 1.3 only with ESNI
 
             // ECH enabled
@@ -184,9 +183,6 @@ public class EchInteropTest {
 
     @Test
     public void testConnectHttpsURLConnectionManualEch() throws IOException {
-        Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        assertEquals("ie.defo.conscrypt", appContext.getPackageName());
-
         for (String hostString : hosts) {
             System.out.println("== EchInteroptTest.testConnectHttpsURLConnectionManualEch " + hostString + " ======");
             String[] h = hostString.split(":");
@@ -197,7 +193,7 @@ public class EchInteropTest {
                 }
             }
             byte[] echConfigList = Conscrypt.getEchConfigListFromDns(dnshost);
-            Conscrypt.echPbuf(hostString, echConfigList);
+            Conscrypt.echPbuf("Conscrypt.getEchConfigListFromDns(" + hostString, echConfigList);
 
             URL url = new URL("https://" + hostString);
             HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
@@ -205,8 +201,8 @@ public class EchInteropTest {
             SSLSocketFactory delegate = connection.getSSLSocketFactory();
             assertTrue(Conscrypt.isConscrypt(delegate));
 
-            DisableAutoEchSSLSocketFactory disableAutoEchSSLSocketFactory = new DisableAutoEchSSLSocketFactory(delegate);
-            connection.setSSLSocketFactory(disableAutoEchSSLSocketFactory);
+            ManualEchSSLSocketFactory manualEchSSLSocketFactory = new ManualEchSSLSocketFactory(delegate);
+            connection.setSSLSocketFactory(manualEchSSLSocketFactory);
 
             // Cloudflare will return 403 Forbidden (error code 1010) unless a User Agent is set :-|
             connection.setRequestProperty("User-Agent", "Conscrypt EchInteropTest");
@@ -230,19 +226,23 @@ public class EchInteropTest {
 
             if (echConfigList == null) {
                 System.out.println(" echAccepted false");
-                assertFalse(Conscrypt.echAccepted(disableAutoEchSSLSocketFactory.sslSocket));
+                assertFalse("ECH should not have worked",
+                        Conscrypt.echAccepted(manualEchSSLSocketFactory.sslSocket));
             } else {
                 System.out.println(" echAccepted true");
-                assertTrue(Conscrypt.echAccepted(disableAutoEchSSLSocketFactory.sslSocket));
+                Conscrypt.echPbuf("Conscrypt.getEchConfigList(disableAutoEchSSLSocketFactory.sslSocket",
+                        Conscrypt.getEchConfigList(manualEchSSLSocketFactory.sslSocket));
+                assertTrue("ECH should have worked",
+                        Conscrypt.echAccepted(manualEchSSLSocketFactory.sslSocket));
             }
             connection.disconnect();
         }
     }
 
-    //@Test
+    @Test
     public void testConnectCloudflareTrace() throws IOException, InterruptedException {
         final String[] hosts = {
-                //"crypto.cloudflare.com",
+                "crypto.cloudflare.com",
                 "cloudflare.f-droid.org",
         };
         final String urlFormat = "https://%s/cdn-cgi/trace";
@@ -375,9 +375,9 @@ public class EchInteropTest {
         }
 
         @Override
-        public Socket createSocket(InetAddress host, int port)
+        public Socket createSocket(InetAddress address, int port)
                 throws IOException {
-            return saveInstance(delegate.createSocket(host, port));
+            return saveInstance(delegate.createSocket(address, port));
         }
 
         @Override
@@ -395,11 +395,12 @@ public class EchInteropTest {
     /**
      * SSLSocketFactory that disables the DNS auto-fetch, then manually do DNS in the test.
      */
-    private static class DisableAutoEchSSLSocketFactory extends SSLSocketFactory {
+    private static class ManualEchSSLSocketFactory extends SSLSocketFactory {
         private final SSLSocketFactory delegate;
+        private String host;
         private SSLSocket sslSocket;
 
-        public DisableAutoEchSSLSocketFactory(SSLSocketFactory delegate) {
+        public ManualEchSSLSocketFactory(SSLSocketFactory delegate) {
             this.delegate = delegate;
         }
 
@@ -416,25 +417,28 @@ public class EchInteropTest {
         @Override
         public Socket createSocket(Socket socket, String host, int port, boolean autoClose)
                 throws IOException {
+            this.host = host;
             return setEchSettings(delegate.createSocket(socket, host, port, autoClose));
         }
 
         @Override
         public Socket createSocket(String host, int port)
                 throws IOException, UnknownHostException {
+            this.host = host;
             return setEchSettings(delegate.createSocket(host, port));
         }
 
         @Override
         public Socket createSocket(String host, int port, InetAddress localAddress, int localPort)
                 throws IOException, UnknownHostException {
+            this.host = host;
             return setEchSettings(delegate.createSocket(host, port, localAddress, localPort));
         }
 
         @Override
-        public Socket createSocket(InetAddress host, int port)
+        public Socket createSocket(InetAddress address, int port)
                 throws IOException {
-            return setEchSettings(delegate.createSocket(host, port));
+            return setEchSettings(delegate.createSocket(address, port));
         }
 
         @Override
@@ -447,6 +451,8 @@ public class EchInteropTest {
             sslSocket = (SSLSocket) socket;
             Conscrypt.setUseEchGrease(sslSocket, false);
             Conscrypt.setCheckDnsForEch(sslSocket, false);
+            byte[] echConfigList = Conscrypt.getEchConfigListFromDns(host, socket.getPort());
+            Conscrypt.setEchConfigList(sslSocket, echConfigList);
             return sslSocket;
         }
     }
