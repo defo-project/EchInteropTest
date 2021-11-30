@@ -42,6 +42,7 @@ dependencies {
 
     implementation 'commons-io:commons-io:2.6'
     implementation 'commons-net:commons-net:3.6'
+    implementation 'androidx.annotation:annotation:1.1.0'
 
     testImplementation 'junit:junit:4.+'
     androidTestImplementation 'androidx.test.ext:junit:1.1.3'
