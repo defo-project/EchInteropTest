@@ -68,14 +68,13 @@ public class EchInteropTest {
             "duckduckgo.com", // TLS 1.3
             "deb.debian.org", // TLS 1.3 Fastly
             "enabled.tls13.com", // TLS 1.3 enabled by Cloudflare
-            "cloudflare.f-droid.org",
-            "tls13.1d.pw", // TLS 1.3 only with ESNI
 
             // ECH enabled
-            "crypto.cloudflare.com",
-            "draft-13.esni.defo.ie:8413", // OpenSSL s_server
-            "draft-13.esni.defo.ie:8414", // OpenSSL s_server, likely forces HRR as it only likes P-384 for TLS =09
-            "draft-13.esni.defo.ie:9413", // lighttpd - host down?
+            "cloudflare-ech.com",
+            "cloudflare.f-droid.org",
+            //"draft-13.esni.defo.ie:8413", // OpenSSL s_server
+            //"draft-13.esni.defo.ie:8414", // OpenSSL s_server, likely forces HRR as it only likes P-384 for TLS =09
+            "draft-13.esni.defo.ie:9413",  // lighttpd
             "draft-13.esni.defo.ie:10413", // nginx
             "draft-13.esni.defo.ie:11413", // apache
             "draft-13.esni.defo.ie:12413", // haproxy shared mode (haproxy terminates TLS)
@@ -87,6 +86,7 @@ public class EchInteropTest {
         Security.insertProviderAt(Conscrypt.newProvider(), 1);
         assertTrue(Conscrypt.isAvailable());
         assertTrue(Conscrypt.isConscrypt(SSLContext.getInstance("TLSv1.3")));
+        Conscrypt.checkAvailability();
     }
 
     @After
@@ -157,6 +157,7 @@ public class EchInteropTest {
             connection.setReadTimeout(0);
             int responseCode = connection.getResponseCode();
             if (responseCode == 200) {
+                System.out.println(hostString + " " + connection.getContentType());
                 assertEquals("text/html", connection.getContentType().split(";")[0]);
             } else if (responseCode == 301 || responseCode == 302) {
                 // crypto.cloudflare.com is a redirect
@@ -170,12 +171,19 @@ public class EchInteropTest {
             connection.getContent();
             assertTrue(connection.getCipherSuite().startsWith("TLS"));
 
+            System.out.println("getCheckDnsForEch: saveInstanceSSLSocketFactory.sslSocket "
+                    + Conscrypt.getCheckDnsForEch(saveInstanceSSLSocketFactory.sslSocket));
+
             if (Conscrypt.getEchConfigListFromDns(dnshost) == null) {
                 System.out.println(" echAccepted false");
-                assertFalse(Conscrypt.echAccepted(saveInstanceSSLSocketFactory.sslSocket));
+                assertFalse("ECH should NOT have been accepted",
+                        Conscrypt.echAccepted(saveInstanceSSLSocketFactory.sslSocket));
             } else {
                 System.out.println(" echAccepted true");
-                assertTrue(Conscrypt.echAccepted(saveInstanceSSLSocketFactory.sslSocket));
+                Conscrypt.echPbuf("saveInstanceSSLSocketFactory.sslSocket",
+                        Conscrypt.getEchConfigList(saveInstanceSSLSocketFactory.sslSocket));
+                assertTrue("ECH should have been accepted",
+                        Conscrypt.echAccepted(saveInstanceSSLSocketFactory.sslSocket));
             }
             connection.disconnect();
         }
@@ -242,50 +250,34 @@ public class EchInteropTest {
     @Test
     public void testConnectCloudflareTrace() throws IOException, InterruptedException {
         final String[] hosts = {
-                "crypto.cloudflare.com",
+                "cloudflare-ech.com",
                 "cloudflare.f-droid.org",
         };
         final String urlFormat = "https://%s/cdn-cgi/trace";
 
-        for (String hostString : hosts) {
-            System.out.println("EchInteroptTest.testConnectCloudflareTrace " + hostString + " =================");
-            String[] h = hostString.split(":");
-            String dnshost = h[0];
-            if (h.length > 1) {
-                if (!"443".equals(h[1])) {
-                    dnshost = "_" + h[1] + "._https." + h[0]; // query for non-standard port
-                }
-            }
-            byte[] echConfigList = Conscrypt.getEchConfigListFromDns(dnshost);
-            Conscrypt.echPbuf("ECH Config List " + hostString, echConfigList);
+        for (String host : hosts) {
+            String urlString = String.format(urlFormat, host);
+            System.out.println("EchInteroptTest.testConnectCloudflareTrace " + urlString + " =================");
 
-            URL url = new URL(String.format(urlFormat, dnshost));
+            URL url = new URL(urlString);
             HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
-            SSLSocketFactory delegateSocketFactory = connection.getSSLSocketFactory();
-            assertTrue(Conscrypt.isConscrypt(delegateSocketFactory));
-            connection.setSSLSocketFactory(new SaveInstanceSSLSocketFactory(delegateSocketFactory));
 
             // Cloudflare will return 403 Forbidden (error code 1010) unless a User Agent is set :-|
             connection.setRequestProperty("User-Agent", "Conscrypt EchInteropTest");
             connection.setConnectTimeout(0); // blocking connect with TCP timeout
             connection.setReadTimeout(0);
             if (connection.getResponseCode() != 200) {
-                System.out.println(IOUtils.toString(connection.getErrorStream(), Charset.defaultCharset()));
+                System.out.println(IOUtils.toString(connection.getErrorStream()));
             }
-
-            BufferedReader br = new BufferedReader(new InputStreamReader(connection.getInputStream()));
-            String inputLine;
-            while ((inputLine = br.readLine()) != null) {
-                System.out.println(inputLine);
-            }
-            br.close();
 
             assertEquals(200, connection.getResponseCode());
             assertEquals("text/plain", connection.getContentType().split(";")[0]);
-            System.out.println(dnshost + " " + connection.getCipherSuite());
+            String trace = IOUtils.toString(connection.getInputStream());
+            System.out.println(urlString + " " + connection.getCipherSuite() + ":\n" + trace);
             assertTrue(connection.getCipherSuite().startsWith("TLS"));
+            assertTrue(host + " contains sni=encrypted", trace.contains("sni=encrypted"));
+            assertFalse(host + " does NOT contain sni=plaintext", trace.contains("sni=plaintext"));
             connection.disconnect();
-
         }
     }
 
