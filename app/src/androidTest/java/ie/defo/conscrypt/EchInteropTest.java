@@ -78,7 +78,8 @@ public class EchInteropTest {
             "draft-13.esni.defo.ie:10413", // nginx
             "draft-13.esni.defo.ie:11413", // apache
             "draft-13.esni.defo.ie:12413", // haproxy shared mode (haproxy terminates TLS)
-            "draft-13.esni.defo.ie:12414", // haproxy plit mode (haproxy only decrypts ECH)
+            "draft-13.esni.defo.ie:12414", // haproxy split mode (haproxy only decrypts ECH)
+            "tls-ech.dev",
     };
 
     @Before
